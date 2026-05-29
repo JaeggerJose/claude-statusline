@@ -1,0 +1,360 @@
+#!/bin/bash
+# csl — Claude Code Status Line package manager (claude-swap style).
+#
+# A theme is a package: a render-contract `themes/<name>.sh` (palette + ART_MODE
+# + SHOW_* toggles) plus an optional `themes/<name>.json` manifest (version,
+# description, art recipe, dependencies). Activating a theme rewrites
+# ~/.claude/settings.json → statusLine.command to "bash <run.sh> <name>", so
+# settings.json is the single source of truth for the active theme.
+#
+#   csl list                installed themes (* = active, with version)
+#   csl search [query]      search themes by name/description
+#   csl info <name>         show a theme's manifest + build state
+#   csl doctor [name]       check dependencies/capabilities (bin, python, terminal)
+#   csl build <name>        (re)run the theme's art recipe (manifest .art.build)
+#   csl set <name>          activate a theme (rewrites settings.json, backed up)
+#   csl use <name>          alias of set
+#   csl next                cycle to the next theme alphabetically
+#   csl preview <name>      render the line once with that theme (no switch)
+#   csl current             print the active theme name
+#   csl status              active theme + the exact settings command
+#   csl init <name>         scaffold a new theme (.sh + .json manifest)
+#   csl edit <name>         open a theme .sh in $EDITOR
+#   csl path                print the statusline dir
+#
+# Testability: override CSL_HOME (statusline dir) and CSL_SETTINGS (settings.json
+# path) to point at fixtures — no real config is touched.
+
+set -euo pipefail
+
+SL_DIR="${CSL_HOME:-$HOME/.claude/statusline}"
+THEMES_DIR="$SL_DIR/themes"
+RUN="$SL_DIR/run.sh"
+RENDER="$SL_DIR/lib/render.sh"
+SETTINGS="${CSL_SETTINGS:-$HOME/.claude/settings.json}"
+GEN="${CSL_GEN:-$HOME/.claude/statusline-gen-art.sh}"
+DEFAULT_THEME="maplestory"
+
+c_bold=$'\033[1m'; c_dim=$'\033[2m'; c_grn=$'\033[32m'
+c_cyn=$'\033[36m'; c_yel=$'\033[33m'; c_red=$'\033[31m'; c_rst=$'\033[0m'
+
+die() { printf '%s\n' "csl: $*" >&2; exit 1; }
+
+command -v jq >/dev/null 2>&1 || die "jq is required (brew install jq)"
+[ -f "$SETTINGS" ] || die "settings.json not found at $SETTINGS"
+
+# ---------------------------------------------------------------------------
+# Path / manifest helpers
+# ---------------------------------------------------------------------------
+expand_tilde() {  # ~/x and $HOME/x → absolute; leave others untouched
+  case "$1" in
+    "~") printf '%s' "$HOME" ;;
+    "~/"*) printf '%s/%s' "$HOME" "${1#"~/"}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+settings_cmd() { jq -r '.statusLine.command // ""' "$SETTINGS"; }
+
+manifest_file() { printf '%s/%s.json' "$THEMES_DIR" "$1"; }
+has_manifest()  { [ -f "$(manifest_file "$1")" ]; }
+
+# manifest_get <name> <jq-filter> [default]
+manifest_get() {
+  local f; f=$(manifest_file "$1")
+  if [ -f "$f" ]; then
+    jq -r "$2 // \"${3:-}\"" "$f" 2>/dev/null || printf '%s' "${3:-}"
+  else
+    printf '%s' "${3:-}"
+  fi
+}
+
+active_theme() {
+  local cmd token
+  cmd=$(settings_cmd)
+  case "$cmd" in
+    *"$RUN"*|*run.sh*)
+      token="${cmd##* }"
+      if [ -f "$THEMES_DIR/$token.sh" ]; then printf '%s' "$token"; else printf '%s' "$DEFAULT_THEME"; fi
+      ;;
+    *) printf '%s' "(custom)";;
+  esac
+}
+
+theme_names() {
+  local f
+  for f in "$THEMES_DIR"/*.sh; do
+    [ -e "$f" ] || continue
+    basename "$f" .sh
+  done | sort
+}
+
+theme_desc() {  # manifest .description, else THEME_DESC= in the .sh
+  local d; d=$(manifest_get "$1" '.description')
+  if [ -z "$d" ]; then
+    local file="$THEMES_DIR/$1.sh"
+    [ -f "$file" ] && d=$(sed -n 's/^THEME_DESC="\(.*\)"$/\1/p' "$file" | head -1)
+  fi
+  printf '%s' "$d"
+}
+
+theme_version() { local v; v=$(manifest_get "$1" '.version'); printf '%s' "${v:--}"; }
+
+require_theme() {
+  [ -f "$THEMES_DIR/$1.sh" ] || die "no such theme '$1' (try: csl list)"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+cmd_list() {
+  local cur name desc ver mark name_fmt
+  cur=$(active_theme)
+  printf '%sStatus line themes%s  %s(%s)%s\n' "$c_bold" "$c_rst" "$c_dim" "$THEMES_DIR" "$c_rst"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    desc=$(theme_desc "$name"); ver=$(theme_version "$name")
+    if [ "$name" = "$cur" ]; then
+      mark="${c_grn}*${c_rst}"; name_fmt="${c_grn}${c_bold}${name}${c_rst}"
+    else
+      mark=" "; name_fmt="${c_cyn}${name}${c_rst}"
+    fi
+    printf '  %s %-18b %s%-7s%s %s%s%s\n' \
+      "$mark" "$name_fmt" "$c_dim" "$ver" "$c_rst" "$c_dim" "$desc" "$c_rst"
+  done < <(theme_names)
+  [ "$cur" = "(custom)" ] && printf '  %s(active statusLine.command is not a csl theme)%s\n' "$c_yel" "$c_rst"
+}
+
+cmd_search() {
+  local q="${1:-}" name desc hay
+  printf '%ssearch%s %s%s%s\n' "$c_dim" "$c_rst" "$c_bold" "${q:-(all)}" "$c_rst"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    desc=$(theme_desc "$name")
+    hay=$(printf '%s %s' "$name" "$desc" | tr '[:upper:]' '[:lower:]')
+    case "$hay" in
+      *"$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')"*)
+        printf '  %s%-18s%s %s%s%s\n' "$c_cyn" "$name" "$c_rst" "$c_dim" "$desc" "$c_rst" ;;
+    esac
+  done < <(theme_names)
+}
+
+cmd_info() {
+  [ $# -ge 1 ] || die "usage: csl info <name>"
+  require_theme "$1"
+  local name="$1" f built mode
+  f=$(manifest_file "$name")
+  printf '%s%s%s' "$c_bold" "$name" "$c_rst"
+  [ "$(active_theme)" = "$name" ] && printf ' %s(active)%s' "$c_grn" "$c_rst"
+  printf '\n'
+  if [ -f "$f" ]; then
+    printf '  %sversion%s    %s\n' "$c_dim" "$c_rst" "$(manifest_get "$name" '.version' '-')"
+    printf '  %sauthor%s     %s\n' "$c_dim" "$c_rst" "$(manifest_get "$name" '.author' '-')"
+    printf '  %slicense%s    %s\n' "$c_dim" "$c_rst" "$(manifest_get "$name" '.license' '-')"
+    printf '  %srender%s     mode=%s cells_h=%s\n' "$c_dim" "$c_rst" \
+      "$(manifest_get "$name" '.render.mode' '-')" "$(manifest_get "$name" '.render.cells_h' '-')"
+    local bld; bld=$(manifest_get "$name" '.art.build')
+    [ -n "$bld" ] && printf '  %sart.build%s  %s\n' "$c_dim" "$c_rst" "$bld"
+    local req; req=$(manifest_get "$name" '(.requires.bin // []) | join(", ")')
+    [ -n "$req" ] && printf '  %srequires%s   bin: %s\n' "$c_dim" "$c_rst" "$req"
+  else
+    printf '  %s(no manifest — metadata from THEME_DESC)%s\n' "$c_yel" "$c_rst"
+  fi
+  printf '  %sdescription%s %s\n' "$c_dim" "$c_rst" "$(theme_desc "$name")"
+  # build state: does its playlist/frames exist?
+  mode=$(manifest_get "$name" '.render.mode'); built="n/a"
+  if [ "$mode" = "gallery" ]; then
+    local pl; pl=$(manifest_get "$name" '.art.dir')
+    pl=$(expand_tilde "$pl")/playlist
+    if [ -s "$pl" ]; then built="${c_grn}built ($(wc -l <"$pl" | tr -d ' ') frames)${c_rst}"
+    else built="${c_yel}not built — run: csl build $name${c_rst}"; fi
+    printf '  %sart%s        %b\n' "$c_dim" "$c_rst" "$built"
+  fi
+}
+
+cmd_doctor() {
+  local names=() name rc=0
+  if [ $# -ge 1 ]; then names=("$1"); else
+    while IFS= read -r name; do [ -n "$name" ] && names+=("$name"); done < <(theme_names)
+  fi
+  printf '%scsl doctor%s\n' "$c_bold" "$c_rst"
+
+  # Terminal truecolor capability (shared).
+  if printf '%s' "${COLORTERM:-}" | grep -qiE 'truecolor|24bit'; then
+    printf '  %s✓%s terminal truecolor (COLORTERM=%s)\n' "$c_grn" "$c_rst" "${COLORTERM}"
+  else
+    printf '  %s!%s terminal truecolor not advertised (COLORTERM=%s) — art may band\n' "$c_yel" "$c_rst" "${COLORTERM:-unset}"
+  fi
+
+  # Collect unique required bins + python modules across the selected themes.
+  local bins="" pymods="" b m
+  for name in "${names[@]}"; do
+    has_manifest "$name" || continue
+    for b in $(manifest_get "$name" '(.requires.bin // []) | .[]'); do
+      case " $bins " in *" $b "*) : ;; *) bins="$bins $b" ;; esac
+    done
+    for m in $(manifest_get "$name" '(.requires.python // []) | .[]'); do
+      case " $pymods " in *" $m "*) : ;; *) pymods="$pymods $m" ;; esac
+    done
+  done
+
+  for b in $bins; do
+    if command -v "$b" >/dev/null 2>&1; then
+      printf '  %s✓%s bin %s (%s)\n' "$c_grn" "$c_rst" "$b" "$(command -v "$b")"
+    else
+      printf '  %s✗%s bin %s — not found\n' "$c_red" "$c_rst" "$b"; rc=1
+    fi
+  done
+  if [ -n "$pymods" ]; then
+    local py; py=$(command -v python3 || true)
+    for m in $pymods; do
+      if [ -n "$py" ] && "$py" -c "import $m" >/dev/null 2>&1; then
+        printf '  %s✓%s python module %s\n' "$c_grn" "$c_rst" "$m"
+      else
+        printf '  %s✗%s python module %s — pip install it\n' "$c_red" "$c_rst" "$m"; rc=1
+      fi
+    done
+  fi
+  [ "$rc" -eq 0 ] && printf '%sall good%s\n' "$c_grn" "$c_rst" || printf '%ssome checks failed%s\n' "$c_yel" "$c_rst"
+  return "$rc"
+}
+
+cmd_build() {
+  [ $# -ge 1 ] || die "usage: csl build <name>"
+  require_theme "$1"
+  has_manifest "$1" || die "'$1' has no manifest.json (nothing to build)"
+  local bld dir
+  bld=$(manifest_get "$1" '.art.build')
+  [ -n "$bld" ] || die "'$1' manifest has no .art.build recipe"
+  dir=$(manifest_get "$1" '.art.dir'); dir=$(expand_tilde "${dir:-$SL_DIR}")
+  [ -d "$dir" ] || die "art.dir does not exist: $dir"
+  printf '%sbuilding%s %s  %s(%s)%s\n' "$c_dim" "$c_rst" "$1" "$c_dim" "$dir" "$c_rst"
+  ( cd "$dir" && CSL_GEN="$GEN" bash -c "$bld" ) \
+    && printf '%s✓ built %s%s\n' "$c_grn" "$1" "$c_rst" \
+    || die "build failed for '$1'"
+}
+
+cmd_current() { active_theme; printf '\n'; }
+
+cmd_status() {
+  printf '%sactive theme%s : %s%s%s\n' "$c_dim" "$c_rst" "$c_grn" "$(active_theme)" "$c_rst"
+  printf '%ssettings cmd%s : %s\n' "$c_dim" "$c_rst" "$(settings_cmd)"
+  printf '%ssettings file%s: %s\n' "$c_dim" "$c_rst" "$SETTINGS"
+}
+
+cmd_set() {
+  [ $# -ge 1 ] || die "usage: csl set <name>"
+  require_theme "$1"
+  local newcmd tmp bak
+  newcmd="bash $RUN $1"
+  bak="$SETTINGS.csl.bak"; cp "$SETTINGS" "$bak"
+  tmp=$(mktemp "${SETTINGS%/*}/.settings.XXXXXX")
+  if jq --arg c "$newcmd" '
+        .statusLine = (.statusLine // {})
+        | .statusLine.type = "command"
+        | .statusLine.command = $c
+        | .statusLine.refreshInterval = (.statusLine.refreshInterval // 1)
+      ' "$SETTINGS" > "$tmp" && jq empty "$tmp" >/dev/null 2>&1; then
+    mv -f "$tmp" "$SETTINGS"
+    printf 'switched to %s%s%s  %s(settings.json updated; live within ~1s)%s\n' \
+      "$c_grn" "$1" "$c_rst" "$c_dim" "$c_rst"
+  else
+    rm -f "$tmp"; die "failed to update settings.json (left untouched; backup at $bak)"
+  fi
+}
+
+cmd_preview() {
+  [ $# -ge 1 ] || die "usage: csl preview <name>"
+  require_theme "$1"
+  [ -f "$RENDER" ] || die "renderer missing: $RENDER"
+  local sample
+  sample='{"model":{"display_name":"Opus 4.8"},"workspace":{"current_dir":"'"$PWD"'"},"output_style":{"name":"explanatory"},"context_window":{"used_percentage":42},"rate_limits":{"five_hour":{"used_percentage":18},"seven_day":{"used_percentage":63}}}'
+  printf '%s── preview: %s ──%s\n' "$c_dim" "$1" "$c_rst"
+  ( source "$RENDER"; source "$THEMES_DIR/$1.sh"; render "$sample" )
+  printf '\n'
+}
+
+cmd_next() {
+  local cur arr=() i n line
+  cur=$(active_theme)
+  while IFS= read -r line; do [ -n "$line" ] && arr+=("$line"); done < <(theme_names)
+  n=${#arr[@]}
+  [ "$n" -gt 0 ] || die "no themes found in $THEMES_DIR"
+  for i in "${!arr[@]}"; do
+    if [ "${arr[$i]}" = "$cur" ]; then cmd_set "${arr[$(( (i + 1) % n ))]}"; return; fi
+  done
+  cmd_set "${arr[0]}"
+}
+
+cmd_edit() {
+  [ $# -ge 1 ] || die "usage: csl edit <name>"
+  require_theme "$1"
+  "${EDITOR:-vi}" "$THEMES_DIR/$1.sh"
+}
+
+cmd_init() {
+  [ $# -ge 1 ] || die "usage: csl init <name>"
+  local name="$1" sh="$THEMES_DIR/$1.sh" js="$THEMES_DIR/$1.json"
+  [ -e "$sh" ] && die "theme '$name' already exists"
+  mkdir -p "$THEMES_DIR"
+  cat > "$sh" <<'TEMPLATE'
+# Theme: __NAME__ — describe it here.
+THEME_DESC="my custom theme"
+
+# Header art: gallery | frames | sixel | iterm | none
+ART_MODE="none"
+
+# Palette — reference base ANSI (A_RED/A_GREEN/A_CYAN/BOLD/DIM/RESET ...)
+# or raw 256-color "\033[38;5;NNNm".
+T_USER="${BOLD}${A_CYAN}"
+T_DIR="${A_WHITE}"
+T_GIT="${A_GREEN}"
+T_MODEL="${A_CYAN}"
+T_STYLE="${DIM}"
+T_TIME="${DIM}"
+T_BAR_LOW="${A_GREEN}"
+T_BAR_MID="${A_YELLOW}"
+T_BAR_HIGH="${A_RED}"
+SEP="${DIM}|${RESET}"
+
+# Segment toggles
+SHOW_GIT=1; SHOW_STYLE=1; SHOW_CTXBAR=1; SHOW_RATE=1; SHOW_TIME=1
+TEMPLATE
+  sed -i '' "s/__NAME__/$name/" "$sh" 2>/dev/null || sed -i "s/__NAME__/$name/" "$sh"
+  jq -n --arg n "$name" '{
+    name: $n, version: "0.1.0", description: "my custom theme",
+    author: "", license: "MIT",
+    render: { mode: "none", cells_h: 18 },
+    requires: { terminal: "truecolor" }
+  }' > "$js"
+  printf 'created %s\n        %s\n' "$sh" "$js"
+  printf 'preview: %scsl preview %s%s   activate: %scsl set %s%s\n' \
+    "$c_dim" "$name" "$c_rst" "$c_dim" "$name" "$c_rst"
+}
+
+cmd_path() { printf '%s\n' "$SL_DIR"; }
+
+usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; }
+
+main() {
+  local cmd="${1:-list}"; shift || true
+  case "$cmd" in
+    list|ls)           cmd_list "$@" ;;
+    search|find)       cmd_search "$@" ;;
+    info|show)         cmd_info "$@" ;;
+    doctor|check)      cmd_doctor "$@" ;;
+    build)             cmd_build "$@" ;;
+    current|cur)       cmd_current "$@" ;;
+    set|use|switch-to) cmd_set "$@" ;;
+    preview|p)         cmd_preview "$@" ;;
+    next|switch)       cmd_next "$@" ;;
+    status)            cmd_status "$@" ;;
+    edit)              cmd_edit "$@" ;;
+    init|new)          cmd_init "$@" ;;
+    path)              cmd_path "$@" ;;
+    help|-h|--help)    usage ;;
+    *)                 die "unknown command '$cmd' (try: csl help)" ;;
+  esac
+}
+
+main "$@"

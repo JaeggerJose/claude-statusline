@@ -1,0 +1,21 @@
+{
+  "name": "bastille-day",
+  "version": "1.0.0",
+  "description": "14 juillet — dusk-fireworks postcard: Eiffel Tower, tricolore flag, fleur-de-lis, cockade, Provence lavender, Bordeaux oysters & wine",
+  "author": "minghsuan",
+  "license": "MIT",
+  "render": {
+    "mode": "gallery",
+    "cells_h": 18
+  },
+  "art": {
+    "dir": "~/.claude/statusline-art/bastille",
+    "build": "bash build.sh",
+    "outputs": ["playlist"]
+  },
+  "requires": {
+    "bin": ["chafa", "python3"],
+    "python": ["PIL"],
+    "terminal": "truecolor"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "pixel-frames",
+  "version": "1.0.0",
+  "description": "Cached pixel-art frames + warm palette",
+  "author": "minghsuan",
+  "license": "MIT",
+  "render": { "mode": "frames", "cells_h": 18 },
+  "requires": {
+    "bin": ["chafa", "python3"],
+    "python": ["PIL"],
+    "terminal": "truecolor"
+  }
+}

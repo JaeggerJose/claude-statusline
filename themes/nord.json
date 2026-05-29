@@ -1,0 +1,9 @@
+{
+  "name": "nord",
+  "version": "1.0.0",
+  "description": "No art, cool Nord 256-color palette",
+  "author": "minghsuan",
+  "license": "MIT",
+  "render": { "mode": "none", "cells_h": 0 },
+  "requires": {}
+}

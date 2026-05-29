@@ -10,6 +10,7 @@ system and its evolution into a **themepack package manager** (`apt`/`pip`/`npm`
 |-----|----------------|
 | [00-architecture-survey.md](00-architecture-survey.md) | **As-is.** How the system works today: data flow, key files, the theme contract, the four ART_MODEs, the art pipeline (chafa/U+2800), and the gaps that motivate a package manager. |
 | [01-package-manager-design.md](01-package-manager-design.md) | **To-be.** The six pillars of a package manager, the "themepack" unit + `manifest.json` schema, git-tap registry, the apt/npm→csl command map, lockfile, and a no-big-bang migration path. |
+| [02-implementation-status.md](02-implementation-status.md) | **Done so far.** What's shipped (manifest layer + `info`/`search`/`doctor`/`build`, recipe↔artifact split, tests) vs. still todo (git-tap registry, lockfile, publish), with verification output. |
 
 ## TL;DR philosophy
 
