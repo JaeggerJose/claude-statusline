@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# csl atomic-write temp files + rolling backups
+.state.*
+.settings.*
+*.bak
+*.csl.bak
+
+# Built art artifacts (regenerable from each themepack's recipe — recipe is
+# tracked, artifacts are not; same principle as npm not tracking node_modules).
+build/
+**/frame*.txt
+**/playlist
+**/count
+**/.src
+*.gif
+
+# Editor / scratch
+*.swp
+*~
