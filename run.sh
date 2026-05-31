@@ -11,19 +11,29 @@
 
 input=$(cat)
 
-SL_DIR="$HOME/.claude/statusline"
-DEFAULT_THEME="maplestory"
+# Self-locate: the repo is wherever THIS script lives — no hardcoded path, so
+# the engine works regardless of where the repo was cloned. CSL_HOME overrides
+# (used by the test suite / custom layouts).
+SL_DIR="${CSL_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)}"
+# Fallback theme when no/invalid arg: a zero-dependency theme so a fresh clone
+# (no built art yet) still renders a clean line out of the box.
+DEFAULT_THEME="nord"
+
+# Two-tier theme resolution (built-in repo themes + user ~/.config/csl/themes).
+CSL_REPO="$SL_DIR"
+# shellcheck source=/dev/null
+source "$SL_DIR/lib/paths.sh"
 
 theme="${1:-$DEFAULT_THEME}"
-theme_file="$SL_DIR/themes/$theme.sh"
-[ -f "$theme_file" ] || theme_file="$SL_DIR/themes/$DEFAULT_THEME.sh"
+theme_file=$(csl_theme_sh "$theme")
+[ -n "$theme_file" ] || theme_file=$(csl_theme_sh "$DEFAULT_THEME")
 
 # render.sh defines base ANSI + defaults; theme overrides after; render() reads
 # final values at call time (shell dynamic scope).
 # shellcheck source=/dev/null
 source "$SL_DIR/lib/render.sh"
 # shellcheck source=/dev/null
-[ -f "$theme_file" ] && source "$theme_file"
+[ -n "$theme_file" ] && source "$theme_file"
 
 render "$input"
 exit 0

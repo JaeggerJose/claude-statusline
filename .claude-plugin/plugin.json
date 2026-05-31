@@ -1,0 +1,22 @@
+{
+  "name": "csl",
+  "version": "1.0.0",
+  "description": "Package-manager-style theme manager for the Claude Code status line. Browse, preview, build, and switch pixel-art / color themes; activation rewrites settings.json so it stays the single source of truth. Built-in themes: nord, minimal, blank. Commands: /csl:setup (install + wire the status line) and /csl:run (drive the CLI).",
+  "author": {
+    "name": "JaeggerJose",
+    "url": "https://github.com/JaeggerJose"
+  },
+  "homepage": "https://github.com/JaeggerJose/claude-statusline",
+  "repository": "https://github.com/JaeggerJose/claude-statusline",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "statusline",
+    "theme",
+    "theme-manager",
+    "cli",
+    "pixel-art",
+    "bash",
+    "package-manager"
+  ]
+}

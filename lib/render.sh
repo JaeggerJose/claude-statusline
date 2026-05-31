@@ -94,7 +94,7 @@ render_art() {
       fi
       if [ -f "$ART_DIR/count" ]; then
         local frame_count idx frame_file
-        frame_count=$(cat "$ART_DIR/count" 2>/dev/null)
+        frame_count=$(tr -cd '0-9' < "$ART_DIR/count" 2>/dev/null)
         if [ "${frame_count:-0}" -gt 0 ]; then
           idx=$(( $(date +%s) % frame_count ))
           frame_file=$(printf '%s/frame%03d.txt' "$ART_DIR" "$idx")
@@ -157,9 +157,14 @@ render() {
   if [ "$SHOW_CTXBAR" = "1" ] && [ -n "$used_pct" ]; then
     local ctx_int filled empty bar bar_color i
     ctx_int=$(printf "%.0f" "$used_pct")
+    # Clamp to 0..100 so the bar is always exactly 10 cells: a negative or >100
+    # value would make `empty` negative and (with the old `seq 1 N`) flood the
+    # bar; C-style loops also avoid BSD `seq 1 0` emitting "1 0" (two iterations).
+    [ "$ctx_int" -lt 0 ]   && ctx_int=0
+    [ "$ctx_int" -gt 100 ] && ctx_int=100
     filled=$(( ctx_int / 10 )); empty=$(( 10 - filled )); bar=""
-    for i in $(seq 1 "$filled"); do bar="${bar}█"; done
-    for i in $(seq 1 "$empty");  do bar="${bar}░"; done
+    for ((i=0; i<filled; i++)); do bar="${bar}█"; done
+    for ((i=0; i<empty;  i++)); do bar="${bar}░"; done
     if   [ "$ctx_int" -ge 90 ]; then bar_color="${T_BAR_HIGH}"
     elif [ "$ctx_int" -ge 70 ]; then bar_color="${T_BAR_MID}"
     else                              bar_color="${T_BAR_LOW}"; fi

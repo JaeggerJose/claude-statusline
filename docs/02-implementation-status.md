@@ -1,7 +1,7 @@
 # Implementation Status
 
 > What of the [package-manager design](01-package-manager-design.md) is actually
-> shipped, verified by `test/run.sh` (47 checks, all green). Updated 2026-05-29.
+> shipped, verified by `test/run.sh` (52 checks, all green). Updated 2026-05-29.
 
 ## Shipped (migration steps 1–3)
 
@@ -18,7 +18,11 @@
 | `csl init` (scaffold .sh + .json) | ✅ | `cmd_init` |
 | Testability hooks `CSL_HOME`/`CSL_SETTINGS` | ✅ | top of `bin/csl`; used by `test/run.sh` |
 | Installable repo (`bin/csl` + `install.sh`) | ✅ | symlinked onto PATH |
-| Test suite | ✅ | `test/run.sh`, 47 checks |
+| Test suite | ✅ | `test/run.sh`, 52 checks |
+| **Portability hardening** (distribution) | ✅ | `run.sh`+`bin/csl` self-locate via `BASH_SOURCE` (no hardcoded `~/.claude` path); `csl set` bootstraps a missing `settings.json`; quoted engine path for homes with spaces; jq deferred so `help`/`path`/`edit` run bare; `doctor` checks UTF-8 locale; default theme = zero-dep `nord` |
+| **Two-tier themes** (built-in vs user) | ✅ | `lib/paths.sh` shared by `bin/csl`+`run.sh`: built-in tier = repo `themes/` (ships `nord`/`minimal`/`blank`); user tier = `~/.config/csl/themes` (`CSL_USER_DIR`), overrides built-ins by name; `csl init` writes there; `list`/`info` show origin. Personal themes (`maplestory`/`bastille-day`/`pixel-frames`) moved to the user tier so cloning the tool no longer ships them |
+| **Security + correctness fixes** (audit `docs/03`) | ✅ | `csl_valid_name` allowlist in `lib/paths.sh` (kills theme-name path traversal + `set` command injection), enforced in `require_theme`/`cmd_init`; `jq empty` preflight in `cmd_set` (clear JSONC error, file left untouched); render bar clamped to 0–100 with `for ((…))` loops (BSD-`seq` width bug); `count` file CRLF-hardened; `help` no longer leaks code; `doctor` empty-array guard. Each fix has a TDD regression test |
+| **Claude Code plugin packaging** | ✅ | `.claude-plugin/{marketplace.json,plugin.json}` + `commands/{setup,run}.md`. `/plugin marketplace add JaeggerJose/claude-statusline` → `/csl:setup` copies the tool to a stable `~/.claude/statusline` and wires the status line there (plugins can't set `statusLine` directly post-v1.31.3, and the plugin dir is versioned/moves); `/csl:run <args>` drives the CLI |
 
 ## Design choice that differs from the doc
 
@@ -43,8 +47,8 @@ Promoting to full themepack dirs (step 2) remains future work.
 ```bash
 $ bash test/run.sh
 …
-1..47
-# pass 47  fail 0  total 47   (exit 0)
+1..52
+# pass 52  fail 0  total 52   (exit 0)
 
 $ csl build bastille-day        # recipe → 18 frames → playlist
 ✓ built bastille-day

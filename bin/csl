@@ -27,21 +27,39 @@
 
 set -euo pipefail
 
-SL_DIR="${CSL_HOME:-$HOME/.claude/statusline}"
+# Self-locate the repo: follow this script's symlink chain to its real file,
+# then up one level (bin/ → repo root). Works when cloned anywhere and when run
+# via the install.sh symlink on PATH. CSL_HOME overrides (test suite / custom).
+_csl_repo() {
+  local src="${BASH_SOURCE[0]:-$0}" dir
+  while [ -L "$src" ]; do
+    dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+    src=$(readlink "$src"); case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")/.." >/dev/null 2>&1 && pwd
+}
+SL_DIR="${CSL_HOME:-$(_csl_repo)}"
 THEMES_DIR="$SL_DIR/themes"
 RUN="$SL_DIR/run.sh"
 RENDER="$SL_DIR/lib/render.sh"
 SETTINGS="${CSL_SETTINGS:-$HOME/.claude/settings.json}"
 GEN="${CSL_GEN:-$HOME/.claude/statusline-gen-art.sh}"
-DEFAULT_THEME="maplestory"
+DEFAULT_THEME="nord"   # zero-dependency fallback; works on a fresh clone
+
+# Two-tier theme resolution (built-in repo themes + user ~/.config/csl/themes),
+# shared verbatim with run.sh so the CLI and engine agree on lookups.
+CSL_REPO="$SL_DIR"
+# shellcheck source=/dev/null
+source "$SL_DIR/lib/paths.sh"
 
 c_bold=$'\033[1m'; c_dim=$'\033[2m'; c_grn=$'\033[32m'
 c_cyn=$'\033[36m'; c_yel=$'\033[33m'; c_red=$'\033[31m'; c_rst=$'\033[0m'
 
 die() { printf '%s\n' "csl: $*" >&2; exit 1; }
 
-command -v jq >/dev/null 2>&1 || die "jq is required (brew install jq)"
-[ -f "$SETTINGS" ] || die "settings.json not found at $SETTINGS"
+# jq is required for anything that reads manifests or edits settings, but help/
+# path stay usable without it so the tool is still discoverable on a bare box.
+need_jq() { command -v jq >/dev/null 2>&1 || die "jq is required (brew install jq)"; }
 
 # ---------------------------------------------------------------------------
 # Path / manifest helpers
@@ -54,10 +72,10 @@ expand_tilde() {  # ~/x and $HOME/x → absolute; leave others untouched
   esac
 }
 
-settings_cmd() { jq -r '.statusLine.command // ""' "$SETTINGS"; }
+settings_cmd() { [ -f "$SETTINGS" ] && jq -r '.statusLine.command // ""' "$SETTINGS" 2>/dev/null || printf ''; }
 
-manifest_file() { printf '%s/%s.json' "$THEMES_DIR" "$1"; }
-has_manifest()  { [ -f "$(manifest_file "$1")" ]; }
+manifest_file() { csl_theme_json "$1"; }   # two-tier (user wins); empty if none
+has_manifest()  { [ -n "$(manifest_file "$1")" ]; }
 
 # manifest_get <name> <jq-filter> [default]
 manifest_get() {
@@ -75,25 +93,19 @@ active_theme() {
   case "$cmd" in
     *"$RUN"*|*run.sh*)
       token="${cmd##* }"
-      if [ -f "$THEMES_DIR/$token.sh" ]; then printf '%s' "$token"; else printf '%s' "$DEFAULT_THEME"; fi
+      if [ -n "$(csl_theme_sh "$token")" ]; then printf '%s' "$token"; else printf '%s' "$DEFAULT_THEME"; fi
       ;;
     *) printf '%s' "(custom)";;
   esac
 }
 
-theme_names() {
-  local f
-  for f in "$THEMES_DIR"/*.sh; do
-    [ -e "$f" ] || continue
-    basename "$f" .sh
-  done | sort
-}
+theme_names() { csl_theme_names; }   # both tiers, deduped (user wins), sorted
 
 theme_desc() {  # manifest .description, else THEME_DESC= in the .sh
   local d; d=$(manifest_get "$1" '.description')
   if [ -z "$d" ]; then
-    local file="$THEMES_DIR/$1.sh"
-    [ -f "$file" ] && d=$(sed -n 's/^THEME_DESC="\(.*\)"$/\1/p' "$file" | head -1)
+    local file; file=$(csl_theme_sh "$1")
+    [ -n "$file" ] && d=$(sed -n 's/^THEME_DESC="\(.*\)"$/\1/p' "$file" | head -1)
   fi
   printf '%s' "$d"
 }
@@ -101,26 +113,29 @@ theme_desc() {  # manifest .description, else THEME_DESC= in the .sh
 theme_version() { local v; v=$(manifest_get "$1" '.version'); printf '%s' "${v:--}"; }
 
 require_theme() {
-  [ -f "$THEMES_DIR/$1.sh" ] || die "no such theme '$1' (try: csl list)"
+  csl_valid_name "$1" || die "invalid theme name '$1' (allowed: letters, digits, . _ - ; no leading dot)"
+  [ -n "$(csl_theme_sh "$1")" ] || die "no such theme '$1' (try: csl list)"
 }
 
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 cmd_list() {
-  local cur name desc ver mark name_fmt
+  local cur name desc ver mark name_fmt org tag
   cur=$(active_theme)
-  printf '%sStatus line themes%s  %s(%s)%s\n' "$c_bold" "$c_rst" "$c_dim" "$THEMES_DIR" "$c_rst"
+  printf '%sStatus line themes%s  %score:%s %s  %suser:%s %s\n' \
+    "$c_bold" "$c_rst" "$c_dim" "$c_rst" "$CSL_BUILTIN_DIR" "$c_dim" "$c_rst" "$CSL_USER_DIR"
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     desc=$(theme_desc "$name"); ver=$(theme_version "$name")
+    org=$(csl_theme_origin "$name"); [ "$org" = "built-in" ] && tag="core" || tag="user"
     if [ "$name" = "$cur" ]; then
       mark="${c_grn}*${c_rst}"; name_fmt="${c_grn}${c_bold}${name}${c_rst}"
     else
       mark=" "; name_fmt="${c_cyn}${name}${c_rst}"
     fi
-    printf '  %s %-18b %s%-7s%s %s%s%s\n' \
-      "$mark" "$name_fmt" "$c_dim" "$ver" "$c_rst" "$c_dim" "$desc" "$c_rst"
+    printf '  %s %-18b %s%-7s%s %s%-4s%s %s%s%s\n' \
+      "$mark" "$name_fmt" "$c_dim" "$ver" "$c_rst" "$c_dim" "$tag" "$c_rst" "$c_dim" "$desc" "$c_rst"
   done < <(theme_names)
   [ "$cur" = "(custom)" ] && printf '  %s(active statusLine.command is not a csl theme)%s\n' "$c_yel" "$c_rst"
 }
@@ -147,7 +162,8 @@ cmd_info() {
   printf '%s%s%s' "$c_bold" "$name" "$c_rst"
   [ "$(active_theme)" = "$name" ] && printf ' %s(active)%s' "$c_grn" "$c_rst"
   printf '\n'
-  if [ -f "$f" ]; then
+  printf '  %sorigin%s     %s\n' "$c_dim" "$c_rst" "$(csl_theme_origin "$name")"
+  if [ -n "$f" ] && [ -f "$f" ]; then
     printf '  %sversion%s    %s\n' "$c_dim" "$c_rst" "$(manifest_get "$name" '.version' '-')"
     printf '  %sauthor%s     %s\n' "$c_dim" "$c_rst" "$(manifest_get "$name" '.author' '-')"
     printf '  %slicense%s    %s\n' "$c_dim" "$c_rst" "$(manifest_get "$name" '.license' '-')"
@@ -186,9 +202,20 @@ cmd_doctor() {
     printf '  %s!%s terminal truecolor not advertised (COLORTERM=%s) — art may band\n' "$c_yel" "$c_rst" "${COLORTERM:-unset}"
   fi
 
+  # UTF-8 locale — the bar (█░) and ellipsis (…) glyphs need it; C/POSIX garbles.
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *UTF-8*|*UTF8*|*utf-8*|*utf8*)
+      printf '  %s✓%s UTF-8 locale (%s)\n' "$c_grn" "$c_rst" "${LC_ALL:-${LC_CTYPE:-$LANG}}" ;;
+    *)
+      printf '  %s!%s locale not UTF-8 (%s) — block/ellipsis glyphs may garble; set LANG=…UTF-8\n' \
+        "$c_yel" "$c_rst" "${LC_ALL:-${LC_CTYPE:-${LANG:-unset}}}" ;;
+  esac
+
   # Collect unique required bins + python modules across the selected themes.
+  # `${arr[@]+"${arr[@]}"}` expands to nothing (not an unbound error) when the
+  # array is empty — needed under `set -u` on bash 3.2 with zero themes present.
   local bins="" pymods="" b m
-  for name in "${names[@]}"; do
+  for name in ${names[@]+"${names[@]}"}; do
     has_manifest "$name" || continue
     for b in $(manifest_get "$name" '(.requires.bin // []) | .[]'); do
       case " $bins " in *" $b "*) : ;; *) bins="$bins $b" ;; esac
@@ -245,10 +272,22 @@ cmd_status() {
 cmd_set() {
   [ $# -ge 1 ] || die "usage: csl set <name>"
   require_theme "$1"
-  local newcmd tmp bak
-  newcmd="bash $RUN $1"
+  local newcmd tmp bak dir
+  # Quote the engine path only if it contains spaces — keeps the common
+  # no-space command byte-identical while staying safe for "/My Drive/..." homes.
+  case "$RUN" in
+    *" "*) newcmd="bash \"$RUN\" $1" ;;
+    *)     newcmd="bash $RUN $1" ;;
+  esac
+  # First run on a fresh machine: ~/.claude may exist but settings.json may not.
+  dir="${SETTINGS%/*}"; [ -d "$dir" ] || mkdir -p "$dir"
+  [ -f "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
+  # Preflight: refuse to touch a non-strict-JSON settings.json (e.g. JSONC with
+  # // comments). Fail loudly with an actionable message instead of a cryptic jq
+  # parse error + a misleading "failed to update" — and leave the file untouched.
+  jq empty "$SETTINGS" >/dev/null 2>&1 || die "settings.json is not valid JSON — jq can't parse it (strip // comments and trailing commas; Claude Code needs strict JSON): $SETTINGS"
   bak="$SETTINGS.csl.bak"; cp "$SETTINGS" "$bak"
-  tmp=$(mktemp "${SETTINGS%/*}/.settings.XXXXXX")
+  tmp=$(mktemp "$dir/.settings.XXXXXX")
   if jq --arg c "$newcmd" '
         .statusLine = (.statusLine // {})
         | .statusLine.type = "command"
@@ -270,7 +309,8 @@ cmd_preview() {
   local sample
   sample='{"model":{"display_name":"Opus 4.8"},"workspace":{"current_dir":"'"$PWD"'"},"output_style":{"name":"explanatory"},"context_window":{"used_percentage":42},"rate_limits":{"five_hour":{"used_percentage":18},"seven_day":{"used_percentage":63}}}'
   printf '%s── preview: %s ──%s\n' "$c_dim" "$1" "$c_rst"
-  ( source "$RENDER"; source "$THEMES_DIR/$1.sh"; render "$sample" )
+  local tf; tf=$(csl_theme_sh "$1")
+  ( source "$RENDER"; source "$tf"; render "$sample" )
   printf '\n'
 }
 
@@ -289,14 +329,16 @@ cmd_next() {
 cmd_edit() {
   [ $# -ge 1 ] || die "usage: csl edit <name>"
   require_theme "$1"
-  "${EDITOR:-vi}" "$THEMES_DIR/$1.sh"
+  "${EDITOR:-vi}" "$(csl_theme_sh "$1")"
 }
 
 cmd_init() {
   [ $# -ge 1 ] || die "usage: csl init <name>"
-  local name="$1" sh="$THEMES_DIR/$1.sh" js="$THEMES_DIR/$1.json"
-  [ -e "$sh" ] && die "theme '$name' already exists"
-  mkdir -p "$THEMES_DIR"
+  csl_valid_name "$1" || die "invalid theme name '$1' (allowed: letters, digits, . _ - ; no leading dot)"
+  # New themes always land in the USER tier — the tool repo stays content-free.
+  local name="$1" sh="$CSL_USER_DIR/$1.sh" js="$CSL_USER_DIR/$1.json"
+  [ -n "$(csl_theme_sh "$name")" ] && die "theme '$name' already exists (pick a new name, or: csl edit $name)"
+  mkdir -p "$CSL_USER_DIR"
   cat > "$sh" <<'TEMPLATE'
 # Theme: __NAME__ — describe it here.
 THEME_DESC="my custom theme"
@@ -332,12 +374,21 @@ TEMPLATE
     "$c_dim" "$name" "$c_rst" "$c_dim" "$name" "$c_rst"
 }
 
-cmd_path() { printf '%s\n' "$SL_DIR"; }
+cmd_path() {
+  printf 'repo      %s\n' "$SL_DIR"
+  printf 'built-in  %s\n' "$CSL_BUILTIN_DIR"
+  printf 'user      %s\n' "$CSL_USER_DIR"
+}
 
-usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
   local cmd="${1:-list}"; shift || true
+  # Everything except these touches manifests/settings → needs jq.
+  case "$cmd" in
+    help|-h|--help|path|edit) ;;
+    *) need_jq ;;
+  esac
   case "$cmd" in
     list|ls)           cmd_list "$@" ;;
     search|find)       cmd_search "$@" ;;
