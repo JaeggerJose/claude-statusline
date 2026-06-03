@@ -50,6 +50,15 @@ A_BLUE="\033[34m"; A_MAGENTA="\033[35m"; A_CYAN="\033[36m"; A_WHITE="\033[37m"
 : "${SHOW_RATE:=1}"
 : "${SHOW_TIME:=1}"
 
+# ---- Component composer ----
+# Components (comp_user/dir/git/model/ctx/tokens/style/clock/jrboard/jrtable)
+# live alongside this file and are composed by _csl_compose() when a theme sets
+# CSL_ROWS. Sourced AFTER the palette/toggle defaults so components see the
+# final T_* / SHOW_* values (and a theme can still override anything after).
+# shellcheck source=/dev/null
+[ -f "${SL_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)}/lib/components.sh" ] && \
+  source "${SL_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)}/lib/components.sh"
+
 # ---- Header art ----------------------------------------------------------
 # Emits the image/animation block for the current ART_MODE. Pure side-effect
 # (prints to stdout). Logic preserved from the original statusline-command.sh.
@@ -106,8 +115,11 @@ render_art() {
   esac
 }
 
-# ---- Full line -----------------------------------------------------------
-render() {
+# ---- Full line (classic, single-function composer) -----------------------
+# Preserved VERBATIM as the backward-compatible path. The new render() (below)
+# dispatches here whenever a theme has NOT declared CSL_ROWS, so every existing
+# theme renders byte-identically to before the component refactor.
+render_classic() {
   local input="$1"
 
   render_art
@@ -190,4 +202,58 @@ render() {
   # conversion and silently truncated the rest of the line.
   local line="${seg_user} ${T_DIM}in${RESET} ${seg_dir}${seg_git}${seg_style} ${SEP} ${ctx_label}${rate_seg}${seg_time}"
   printf '%b' "$line" 2>/dev/null || true
+}
+
+# ---- Component composer --------------------------------------------------
+# Drives the comp_<name> functions when a theme declares CSL_ROWS. Each element
+# of CSL_ROWS is one OUTPUT LINE; within a line, space-separated component names
+# are run in order. Non-empty segments are joined with CSL_SEP (default " · ");
+# rows are joined with newlines. An all-empty row is omitted (no blank line).
+# Unknown component names are skipped silently. render_art() runs once at top.
+_csl_compose() {
+  local input="$1"
+  local sep="${CSL_SEP:- · }"
+  local cols="${CSL_COLUMNS:-80}"
+
+  render_art
+
+  local out="" row name seg row_line have_row first_row=1
+  for row in "${CSL_ROWS[@]}"; do
+    row_line=""; have_row=0
+    local first_seg=1
+    for name in $row; do
+      # Only dispatch to a defined component; unknown names skip silently.
+      if declare -F "comp_${name}" >/dev/null 2>&1; then
+        seg=$("comp_${name}" "$input" "$cols" 2>/dev/null) || seg=""
+      else
+        seg=""
+      fi
+      [ -n "$seg" ] || continue
+      if [ "$first_seg" -eq 1 ]; then
+        row_line="$seg"; first_seg=0
+      else
+        row_line="${row_line}${sep}${seg}"
+      fi
+      have_row=1
+    done
+    [ "$have_row" -eq 1 ] || continue          # omit all-empty rows
+    if [ "$first_row" -eq 1 ]; then
+      out="$row_line"; first_row=0
+    else
+      out="${out}"$'\n'"${row_line}"
+    fi
+  done
+
+  printf '%b' "$out" 2>/dev/null || true
+}
+
+# ---- Dispatch ------------------------------------------------------------
+# Component composer when a theme set CSL_ROWS; otherwise the classic renderer.
+# Themes that do NOT set CSL_ROWS are byte-identical to the pre-refactor output.
+render() {
+  if [ "${#CSL_ROWS[@]}" -gt 0 ] 2>/dev/null; then
+    _csl_compose "$1"
+  else
+    render_classic "$1"
+  fi
 }
